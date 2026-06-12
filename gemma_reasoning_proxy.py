@@ -16,7 +16,11 @@ PORT = 8082
 UPSTREAM = "http://127.0.0.1:8081"
 UPSTREAM_TIMEOUT_SECONDS = 120
 FAST_PATH_MAX_OUTPUT_TOKENS = 32
+DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS = 128
 FAST_PATH_MAX_PROMPT_CHARS = 200
+SIMPLE_DIRECT_MAX_PROMPT_CHARS = 240
+REASONING_DEFAULT_MAX_OUTPUT_TOKENS = 512
+REASONING_MAX_OUTPUT_TOKENS = 512
 FAST_PATH_EXACT_OUTPUT_RE = re.compile(
     r"\b(?:reply|respond|answer|output|return|print|say)\s+"
     r"(?:with\s+)?(?:only|exactly)\b",
@@ -30,6 +34,10 @@ FAST_PATH_COMPLEX_RE = re.compile(
     r"reasoning|reason|think|deep|deeply|plan|planning|verify|verification|"
     r"benchmark|measure|optimize|compare"
     r")\b",
+    re.IGNORECASE,
+)
+SIMPLE_DIRECT_REASONING_RE = re.compile(
+    r"\b(why|cause|caused|explain|analy[sz]e|investigate|exactly)\b",
     re.IGNORECASE,
 )
 PUBLIC_ERROR_MESSAGE = "Reasoning proxy request failed."
@@ -64,7 +72,14 @@ def build_response_payload(final_text, response_id=None, model=None, metadata=No
     if model:
         payload["model"] = model
     if isinstance(metadata, dict):
-        for key in ("usage", "model_calls", "context_length", "cache_hit", "cache_hit_rate"):
+        for key in (
+            "usage",
+            "model_calls",
+            "context_length",
+            "cache_hit",
+            "cache_hit_rate",
+            "reasoning_mode",
+        ):
             if key in metadata:
                 payload[key] = metadata[key]
     return payload
@@ -204,12 +219,25 @@ def _small_output_cap(payload):
     return 0 < token_cap <= FAST_PATH_MAX_OUTPUT_TOKENS
 
 
+def _output_cap(payload):
+    token_cap = payload.get("max_output_tokens", payload.get("max_tokens"))
+    if token_cap is None:
+        return None
+    try:
+        token_cap = int(token_cap)
+    except (TypeError, ValueError):
+        return None
+    if token_cap <= 0:
+        return None
+    return token_cap
+
+
 def should_use_direct_fast_path(payload):
     if not isinstance(payload, dict):
         return False
     if payload.get(FORCE_REASONING_FIELD):
         return False
-    return _is_simple_exact_output_payload(payload)
+    return _is_simple_exact_output_payload(payload) or _is_simple_direct_payload(payload)
 
 
 def should_use_lightweight_reasoning(payload):
@@ -221,11 +249,10 @@ def should_use_lightweight_reasoning(payload):
 
 
 def _is_simple_exact_output_payload(payload):
-    if payload.get("stream"):
-        return False
     if payload.get("tool_choice") or payload.get("parallel_tool_calls"):
         return False
-    if not _small_output_cap(payload):
+    cap = _output_cap(payload)
+    if cap is not None and cap > FAST_PATH_MAX_OUTPUT_TOKENS:
         return False
 
     task = latest_user_task_text(payload).strip()
@@ -238,11 +265,66 @@ def _is_simple_exact_output_payload(payload):
     return bool(FAST_PATH_EXACT_OUTPUT_RE.search(lower_task))
 
 
+def _is_simple_direct_payload(payload):
+    if payload.get("tool_choice") or payload.get("parallel_tool_calls"):
+        return False
+    cap = _output_cap(payload)
+    if cap is not None and cap > DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS:
+        return False
+
+    task = latest_user_task_text(payload).strip()
+    if not task or len(task) > SIMPLE_DIRECT_MAX_PROMPT_CHARS:
+        return False
+    if "\n" in task:
+        return False
+    lower_task = task.lower()
+    if FAST_PATH_EXACT_OUTPUT_RE.search(lower_task) and cap is not None and cap > FAST_PATH_MAX_OUTPUT_TOKENS:
+        return False
+    if FAST_PATH_COMPLEX_RE.search(lower_task):
+        return False
+    if SIMPLE_DIRECT_REASONING_RE.search(lower_task):
+        return False
+    return True
+
+
+def _apply_output_token_budget(payload, *, default_cap, hard_cap=None):
+    capped = copy.deepcopy(payload)
+    cap = _output_cap(capped)
+    if cap is None:
+        capped.pop("max_tokens", None)
+        capped["max_output_tokens"] = default_cap
+        return capped
+    if hard_cap is not None and cap > hard_cap:
+        capped.pop("max_tokens", None)
+        capped["max_output_tokens"] = hard_cap
+        return capped
+    if "max_tokens" in capped and "max_output_tokens" not in capped:
+        capped["max_output_tokens"] = cap
+        capped.pop("max_tokens", None)
+    return capped
+
+
 def fast_path_payload(payload):
-    forwarded = copy.deepcopy(payload)
+    forwarded = _apply_output_token_budget(
+        payload,
+        default_cap=DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS,
+        hard_cap=DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS,
+    )
     for key in ("tools", "parallel_tool_calls", FORCE_REASONING_FIELD):
         forwarded.pop(key, None)
+    forwarded["stream"] = False
     return forwarded
+
+
+def prepare_reasoning_payload(payload):
+    prepared = _apply_output_token_budget(
+        payload,
+        default_cap=REASONING_DEFAULT_MAX_OUTPUT_TOKENS,
+        hard_cap=REASONING_MAX_OUTPUT_TOKENS,
+    )
+    for key in ("tools", "parallel_tool_calls", FORCE_REASONING_FIELD):
+        prepared.pop(key, None)
+    return prepared
 
 
 def forward_response_to_upstream(request_payload, upstream=UPSTREAM):
@@ -265,18 +347,16 @@ def run_reasoning_request(request_payload, graph_runner=None, upstream=UPSTREAM)
         from gemma_reasoning.upstream import UpstreamResponsesClient
 
         client = UpstreamResponsesClient(upstream)
-        if should_use_lightweight_reasoning(request_payload):
-            programs = LocalHeuristicPrograms()
-            config = ReasoningConfig(use_langgraph=False)
-            graph_runner = lambda payload: run_reasoning_graph(
-                payload,
-                client=client,
-                programs=programs,
-                config=config,
-            )
-        else:
-            graph_runner = lambda payload: run_reasoning_graph(payload, client=client)
-    result = graph_runner(request_payload)
+        programs = LocalHeuristicPrograms()
+        config = ReasoningConfig(max_revisions=0, use_langgraph=False)
+        graph_runner = lambda payload: run_reasoning_graph(
+            payload,
+            client=client,
+            programs=programs,
+            config=config,
+        )
+    result = graph_runner(prepare_reasoning_payload(request_payload))
+    result.setdefault("reasoning_mode", "single_pass_local_plan")
     return build_response_payload(
         result.get("final_text", ""),
         model=request_payload.get("model"),

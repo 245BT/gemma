@@ -12,6 +12,13 @@ HOST = "127.0.0.1"
 PORT = 8081
 UPSTREAM_TIMEOUT_SECONDS = 120
 CHANNEL_RE = re.compile(r"^\s*<\|channel\>(?:thought|final)\s*<channel\|>\s*", re.IGNORECASE)
+INTERNAL_TOOL_CALL_PREFIX_RE = re.compile(
+    r"^\s*<\|tool_call\>call:codex:[A-Za-z0-9_.:-]+(?:\{[^<>\r\n]*\})?<tool_call\|>\s*",
+    re.IGNORECASE,
+)
+INTERNAL_TOOL_CALL_START = "<|tool_call>"
+INTERNAL_TOOL_CALL_END = "<tool_call|>"
+INTERNAL_TOOL_CALL_MAX_BUFFER = 512
 STREAM_TEXT_KEYS = {"content", "delta", "text"}
 STREAM_CHANNEL_MARKERS = tuple(
     f"<|channel>{role}{separator}<channel|>"
@@ -22,12 +29,37 @@ STREAM_CHANNEL_MARKERS = tuple(
 
 def clean_channel_markers(text):
     cleaned, count = CHANNEL_RE.subn("", text, count=1)
-    return cleaned if count else text
+    return clean_internal_tool_call_markers(cleaned if count else text)
+
+
+def clean_internal_tool_call_markers(text):
+    return INTERNAL_TOOL_CALL_PREFIX_RE.sub("", text, count=1)
+
+
+def is_internal_tool_call_text(text):
+    if not isinstance(text, str) or not text.strip():
+        return False
+    return INTERNAL_TOOL_CALL_PREFIX_RE.match(text) is not None and clean_internal_tool_call_markers(text) == ""
 
 
 def is_channel_marker_prefix(text):
     candidate = text.lstrip().lower()
     return not candidate or any(marker.startswith(candidate) for marker in STREAM_CHANNEL_MARKERS)
+
+
+def is_internal_tool_call_prefix(text):
+    candidate = text.lstrip().lower()
+    if not candidate:
+        return True
+    if INTERNAL_TOOL_CALL_START.startswith(candidate):
+        return True
+    return (
+        candidate.startswith(INTERNAL_TOOL_CALL_START)
+        and INTERNAL_TOOL_CALL_END not in candidate
+        and "\n" not in candidate
+        and "\r" not in candidate
+        and len(candidate) <= INTERNAL_TOOL_CALL_MAX_BUFFER
+    )
 
 
 class StreamChannelCleaner:
@@ -46,7 +78,7 @@ class StreamChannelCleaner:
             self.pending = False
             return cleaned
 
-        if is_channel_marker_prefix(self.buffer):
+        if is_channel_marker_prefix(self.buffer) or is_internal_tool_call_prefix(self.buffer):
             return ""
 
         self.pending = False
@@ -57,6 +89,8 @@ class StreamChannelCleaner:
 
 def clean_response_payload(payload):
     cleaned = copy.deepcopy(payload)
+    if isinstance(cleaned.get("output_text"), str):
+        cleaned["output_text"] = clean_channel_markers(cleaned["output_text"])
     for item in cleaned.get("output", []):
         for content in item.get("content", []):
             if isinstance(content, dict) and isinstance(content.get("text"), str):

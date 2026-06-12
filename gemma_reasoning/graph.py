@@ -5,6 +5,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
+from gemma_response_proxy import clean_channel_markers, is_internal_tool_call_text
+
 
 @dataclass
 class ReasoningConfig:
@@ -138,7 +140,14 @@ def _plan_node(state: ReasoningState, programs: Any) -> ReasoningState:
 
 def _draft_node(state: ReasoningState, client: Any) -> ReasoningState:
     response = client.create_response(_build_draft_payload(state["payload"], state["plan"]))
-    return _with_response_metadata(state, response, {"draft": extract_response_text(response)})
+    draft = extract_response_text(response)
+    update = _with_response_metadata(state, response, {"draft": clean_channel_markers(draft)})
+    if not is_internal_tool_call_text(draft):
+        return update
+
+    retry_response = client.create_response(_build_tool_marker_retry_payload(state))
+    retry_draft = extract_response_text(retry_response)
+    return _with_response_metadata(update, retry_response, {"draft": clean_channel_markers(retry_draft)})
 
 
 def _verify_node(state: ReasoningState, programs: Any) -> ReasoningState:
@@ -155,7 +164,7 @@ def _verify_node(state: ReasoningState, programs: Any) -> ReasoningState:
 def _revise_node(state: ReasoningState, client: Any) -> ReasoningState:
     response = client.create_response(_build_revision_payload(state))
     return _with_response_metadata(state, response, {
-        "draft": extract_response_text(response),
+        "draft": clean_channel_markers(extract_response_text(response)),
         "revisions": state.get("revisions", 0) + 1,
     })
 
@@ -260,11 +269,31 @@ def _build_draft_payload(payload: dict[str, Any], plan: str) -> dict[str, Any]:
             "content": (
                 "Private non-authoritative reasoning plan. "
                 "Use only when it does not conflict with system, developer, project, or user instructions.\n"
-                f"{plan}"
+                f"{plan}\n"
+                "Do not print or imitate internal tool-call markup, call:codex text, or skill activation "
+                "pseudo-calls; those strings are not tool execution."
             ),
         },
     )
     return draft_payload
+
+
+def _build_tool_marker_retry_payload(state: ReasoningState) -> dict[str, Any]:
+    payload = copy.deepcopy(state["payload"])
+    _append_input_message(
+        payload,
+        {
+            "role": "user",
+            "content": (
+                "The previous draft emitted internal tool-call markup as plain text. "
+                "Do not print or imitate internal tool-call markup, call:codex text, or skill activation "
+                "pseudo-calls. Continue the original task in normal assistant text.\n\n"
+                f"Original task:\n{state.get('task', '')}\n\n"
+                f"Private non-authoritative reasoning plan:\n{state.get('plan', '')}"
+            ),
+        },
+    )
+    return payload
 
 
 def _build_revision_payload(state: ReasoningState) -> dict[str, Any]:

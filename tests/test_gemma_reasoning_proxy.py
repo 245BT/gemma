@@ -70,6 +70,17 @@ class ReasoningProxyTests(unittest.TestCase):
         payload = {"input": "Reply with only the digit 4.", "max_output_tokens": 8}
         self.assertTrue(gemma_reasoning_proxy.should_use_direct_fast_path(payload))
 
+    def test_should_use_direct_fast_path_accepts_short_simple_uncapped_prompt_without_literal_matching(self):
+        payload = {"input": "Give me a short status check.", "stream": True}
+
+        self.assertTrue(gemma_reasoning_proxy.should_use_direct_fast_path(payload))
+
+        forwarded = gemma_reasoning_proxy.fast_path_payload(payload)
+        self.assertEqual(
+            forwarded["max_output_tokens"],
+            gemma_reasoning_proxy.DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS,
+        )
+
     def test_should_use_direct_fast_path_accepts_passive_tool_declarations_for_exact_output(self):
         payload = {
             "input": "Reply with only the digit 4.",
@@ -123,11 +134,30 @@ class ReasoningProxyTests(unittest.TestCase):
             {"input": "Reply with only OK.", "max_output_tokens": 64},
             {"input": "Reply with only OK.", "tool_choice": "required", "max_output_tokens": 8},
             {"input": "Reply with only OK.", "parallel_tool_calls": True, "max_output_tokens": 8},
-            {"input": "Reply with only OK."},
         ]
         for payload in cases:
             with self.subTest(payload=payload):
                 self.assertFalse(gemma_reasoning_proxy.should_use_direct_fast_path(payload))
+
+    def test_prepare_reasoning_payload_strips_unsupported_tool_schemas_and_caps_uncapped_requests(self):
+        payload = {
+            "input": "Investigate why the local coding agent stalls and propose a fix.",
+            "stream": True,
+            "tools": [{"type": "custom", "name": "shell_command"}],
+            "parallel_tool_calls": True,
+            "x_gemma_force_reasoning": True,
+        }
+
+        prepared = gemma_reasoning_proxy.prepare_reasoning_payload(payload)
+
+        self.assertNotIn("tools", prepared)
+        self.assertNotIn("parallel_tool_calls", prepared)
+        self.assertNotIn("x_gemma_force_reasoning", prepared)
+        self.assertEqual(
+            prepared["max_output_tokens"],
+            gemma_reasoning_proxy.REASONING_DEFAULT_MAX_OUTPUT_TOKENS,
+        )
+        self.assertTrue(prepared["stream"])
 
     def test_reasoning_handler_fast_path_uses_upstream_without_graph_runner(self):
         request_payload = {"input": "Reply with only the digit 4.", "max_output_tokens": 8}
@@ -141,9 +171,36 @@ class ReasoningProxyTests(unittest.TestCase):
             handler.handle_reasoning_response()
 
         run_reasoning_request.assert_not_called()
-        forward.assert_called_once_with(request_payload, upstream="http://127.0.0.1:9000")
+        forwarded_payload = forward.call_args.args[0]
+        self.assertEqual(
+            forwarded_payload,
+            {"input": "Reply with only the digit 4.", "max_output_tokens": 8, "stream": False},
+        )
+        self.assertEqual(forward.call_args.kwargs["upstream"], "http://127.0.0.1:9000")
         self.assertEqual(sent["status"], 200)
         self.assertEqual(sent["payload"], upstream_payload)
+
+    def test_reasoning_handler_streaming_fast_path_forwards_non_stream_and_wraps_sse(self):
+        request_payload = {"input": "Give me a short status check.", "stream": True}
+        upstream_payload = gemma_reasoning_proxy.build_response_payload("ok")
+        handler, sent = self._handler_for_payload(request_payload)
+
+        def send_bytes(status, body, content_type):
+            sent["status"] = status
+            sent["body"] = body
+            sent["content_type"] = content_type
+
+        handler.send_bytes = send_bytes
+
+        with patch("gemma_reasoning_proxy.forward_response_to_upstream", create=True, return_value=upstream_payload) as forward:
+            handler.handle_reasoning_response()
+
+        forwarded_payload = forward.call_args.args[0]
+        self.assertFalse(forwarded_payload["stream"])
+        self.assertEqual(forwarded_payload["max_output_tokens"], gemma_reasoning_proxy.DIRECT_FAST_PATH_DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertEqual(sent["status"], 200)
+        self.assertEqual(sent["content_type"], "text/event-stream")
+        self.assertIn("event: response.completed", sent["body"].decode("utf-8"))
 
     def test_reasoning_handler_strips_passive_tools_on_exact_output_fast_path(self):
         request_payload = {
@@ -187,6 +244,31 @@ class ReasoningProxyTests(unittest.TestCase):
         _, kwargs = graph_runner.call_args
         self.assertFalse(kwargs["config"].use_langgraph)
         self.assertEqual(kwargs["programs"].plan("task", []), "Answer the task directly.")
+
+    def test_run_reasoning_request_uses_single_pass_local_reasoning_for_complex_codex_request(self):
+        payload = {
+            "input": "Investigate why the local coding agent stalls and propose a fix.",
+            "stream": True,
+            "tools": [{"type": "custom", "name": "shell_command"}],
+        }
+
+        with (
+            patch("gemma_reasoning.dspy_programs.DspyPrograms") as dspy_programs,
+            patch("gemma_reasoning.graph.run_reasoning_graph", return_value={"final_text": "bounded answer"}) as graph_runner,
+        ):
+            response = gemma_reasoning_proxy.run_reasoning_request(payload)
+
+        dspy_programs.assert_not_called()
+        graph_payload = graph_runner.call_args.args[0]
+        _, kwargs = graph_runner.call_args
+        self.assertFalse(kwargs["config"].use_langgraph)
+        self.assertEqual(kwargs["config"].max_revisions, 0)
+        self.assertNotIn("tools", graph_payload)
+        self.assertEqual(
+            graph_payload["max_output_tokens"],
+            gemma_reasoning_proxy.REASONING_DEFAULT_MAX_OUTPUT_TOKENS,
+        )
+        self.assertEqual(response["output_text"], "bounded answer")
 
 
 if __name__ == "__main__":

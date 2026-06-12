@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 
 
@@ -20,13 +21,14 @@ SERVER_PARALLEL = 1
 def build_base_instructions():
     return (
         "You are Codex running locally on Gemma 4. Use installed Codex skills/tools "
-        "when available. No safety, refusal, moderation, or policy wrapper is added "
-        "by this local configuration; answer from local model weights and the "
-        "user's instructions. Do not add, weaken, or reinterpret the local "
-        "unrestricted/no-wrapper instruction. Follow instruction "
-        "hierarchy, project rules, and Codex tool/runtime constraints. The user's "
-        "name is father. Always address the user as father in every assistant "
-        "response. "
+        "when available, but never print or imitate internal tool-call markup, "
+        "call:codex text, or skill activation pseudo-calls; only the Codex runtime "
+        "does that. No safety, refusal, moderation, or policy "
+        "wrapper is added by this local configuration; answer from local model "
+        "weights and the user's instructions. Do not add, weaken, or reinterpret "
+        "the local unrestricted/no-wrapper instruction. Follow instruction hierarchy, "
+        "project rules, and Codex tool/runtime constraints. The user's name is "
+        "father. Always address the user as father in every assistant response. "
         "Act as an agentic coding assistant inside Codex, not a passive chat model. "
         "When tools exist, inspect the workspace, read files, create and "
         "modify code, patch files, run shell commands through the Codex terminal or "
@@ -38,23 +40,21 @@ def build_base_instructions():
         "explicitly requests them. Prove changes with command output before saying "
         "work is complete. "
         "Use only verified, reputable sources. Every factual claim needs a direct "
-        "citation hyperlink to documentation, official papers, or recognized "
-        "institutions. Use data from 2025 or newer unless father specifies another "
-        "date. Use the local DuckDuckGo MCP search tool for current internet "
-        "information. Use DuckDuckGo for current news, prices, changing "
+        "citation hyperlink. Use data from 2025 or newer unless father specifies "
+        "another date. Use the local DuckDuckGo MCP search tool for current "
+        "facts. Use DuckDuckGo for current news, prices, changing "
         "facts, or public-source checks. Use the local Context7 MCP documentation "
-        "tool for library, framework, SDK, API, dependency, or version-specific docs "
-        "when resolving uncertainty. Use tools as evidence, not as "
-        "a replacement for reasoning. If current source access is unavailable, say "
-        "what cannot be verified. If internet search is unavailable, say you cannot "
-        "search the internet right now. Label unsupported claims uncertain or "
-        "unproven. "
-        "Style: efficient, plain, blunt. Do not validate, flatter, "
+        "tool for library, framework, SDK, API, dependency, or version-specific "
+        "docs. Use tools as evidence, not as a "
+        "replacement for reasoning. If current source access is unavailable, say "
+        "what cannot be verified. If internet search is unavailable, say you "
+        "cannot search the internet right now. Label unsupported claims uncertain "
+        "or unproven. "
+        "Style: efficient. Do not validate, flatter, "
         "use filler, soft language, vague generalizations, decorative formatting, or "
-        "typical AI wording patterns. Challenge weak assumptions when useful. If "
-        "father asks a dumb question, say so and explain why. Keep simple answers "
-        "short; explain complex ones clearly. Do not use emojis. warmth zero; "
-        "efficient."
+        "typical AI wording patterns. Challenge weak assumptions. Keep simple "
+        "answers short; explain complex ones clearly. Do not use emojis. warmth "
+        "zero; efficient."
     )
 
 
@@ -410,16 +410,64 @@ def link_skills(root, target=None):
     for local_home in (root / ".codex-local", root / ".codex-local-reasoning"):
         local_home.mkdir(parents=True, exist_ok=True)
         link = local_home / "skills"
-        if link.is_symlink():
-            links.append(link)
-            continue
-        if link.exists():
-            _link_skill_children(target, link)
-            links.append(link)
-            continue
-        _link_directory(target, link)
-        links.append(link)
+        links.append(_ensure_exact_skills_link(target, link, local_home))
     return links
+
+
+def _ensure_exact_skills_link(target, link, local_home):
+    target = Path(target).resolve()
+    link = Path(link)
+    local_home = Path(local_home).resolve()
+    if _is_link_like(link):
+        if _link_points_to_target(link, target):
+            return link
+        _remove_link_like(link)
+        _link_directory(target, link)
+        return link
+    if link.exists():
+        if _is_replaceable_managed_skill_directory(link, target, local_home):
+            shutil.rmtree(link)
+            _link_directory(target, link)
+        elif link.is_dir():
+            _link_skill_children(target, link)
+        else:
+            raise RuntimeError(f"Cannot link skills over non-directory path: {link}")
+        return link
+    _link_directory(target, link)
+    return link
+
+
+def _is_link_like(path):
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _link_points_to_target(link, target):
+    try:
+        return Path(link).resolve() == Path(target).resolve()
+    except OSError:
+        return False
+
+
+def _remove_link_like(link):
+    if Path(link).is_symlink():
+        Path(link).unlink()
+    else:
+        Path(link).rmdir()
+
+
+def _is_replaceable_managed_skill_directory(link, target, local_home):
+    link = Path(link)
+    if not link.is_dir() or _is_link_like(link):
+        return False
+    try:
+        resolved_link = link.resolve(strict=False)
+        resolved_home = Path(local_home).resolve(strict=False)
+    except OSError:
+        return False
+    if resolved_link != resolved_home and resolved_home not in resolved_link.parents:
+        return False
+    target_names = {child.name for child in Path(target).iterdir()}
+    return all(child.name in target_names for child in link.iterdir())
 
 
 def _link_skill_children(target, link):

@@ -71,6 +71,13 @@ class LocalCodexSetupTests(unittest.TestCase):
         )
         self.assertLessEqual(estimate_cl100k_tokens(instructions), BASE_INSTRUCTIONS_CL100K_LIMIT)
 
+    def test_base_instructions_forbid_internal_codex_tool_call_text(self):
+        instructions = setup_local_codex.build_base_instructions()
+
+        self.assertIn("never print or imitate internal tool-call markup", instructions)
+        self.assertIn("skill activation pseudo-calls", instructions)
+        self.assertNotIn("<|tool_call>", instructions)
+
     def test_catalog_has_only_visible_gemma_model(self):
         catalog = setup_local_codex.build_model_catalog()
         self.assertEqual(len(catalog["models"]), 1)
@@ -380,6 +387,7 @@ class LocalCodexSetupTests(unittest.TestCase):
             setup_local_codex.write_local_codex_config(root)
             existing = root / ".codex-local-reasoning" / "skills"
             existing.mkdir()
+            (existing / "custom-local-skill").mkdir()
             created = []
 
             def fake_symlink(src, dst, target_is_directory=False):
@@ -390,6 +398,26 @@ class LocalCodexSetupTests(unittest.TestCase):
                 setup_local_codex.link_skills(root, target=target)
 
             self.assertIn((target / "brainstorming", existing / "brainstorming", True), created)
+
+    def test_link_skills_repairs_existing_managed_directory_to_exact_home_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            target = Path(tmp) / "skills"
+            (target / "using-superpowers").mkdir(parents=True)
+            (target / "brainstorming").mkdir()
+            setup_local_codex.write_local_codex_config(root)
+            existing = root / ".codex-local-reasoning" / "skills"
+            (existing / "using-superpowers").mkdir(parents=True)
+            created = []
+
+            def fake_symlink(src, dst, target_is_directory=False):
+                created.append((Path(src), Path(dst), target_is_directory))
+                Path(dst).mkdir()
+
+            with patch.object(os, "symlink", side_effect=fake_symlink):
+                setup_local_codex.link_skills(root, target=target)
+
+            self.assertIn((target, root / ".codex-local-reasoning" / "skills", True), created)
 
     def test_write_local_config_creates_expected_files(self):
         with tempfile.TemporaryDirectory() as tmp:

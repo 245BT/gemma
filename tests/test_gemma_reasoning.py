@@ -210,6 +210,21 @@ class ReasoningGraphTests(unittest.TestCase):
         self.assertEqual(result["final_text"], "final answer")
         self.assertEqual(result["model_calls"], 1)
 
+    def test_run_reasoning_graph_retries_internal_codex_tool_call_marker_as_text(self):
+        marker = "<|tool_call>call:codex:using_superpowers{}<tool_call|>"
+        client = FakeClient([marker, "normal answer"])
+
+        result = run_reasoning_graph(
+            {"input": [{"role": "user", "content": "fix the local agent"}]},
+            client=client,
+            programs=FakePrograms(),
+            config=ReasoningConfig(max_revisions=0, use_langgraph=False),
+        )
+
+        self.assertEqual(result["final_text"], "normal answer")
+        self.assertEqual(result["model_calls"], 2)
+        self.assertIn("Do not print or imitate internal tool-call markup", client.calls[1]["input"][-1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
