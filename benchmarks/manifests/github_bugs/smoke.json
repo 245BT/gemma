@@ -1,0 +1,11 @@
+{
+  "id": "smoke-template",
+  "repo_url": "https://github.com/example/project",
+  "commit": "0000000000000000000000000000000000000000",
+  "issue": "Replace this template with a real GitHub issue or bug report.",
+  "setup_commands": [],
+  "test_commands": [
+    "python -m pytest"
+  ],
+  "success_criteria": "All listed test_commands exit with code 0 after Gemma edits the checkout."
+}

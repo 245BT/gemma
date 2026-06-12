@@ -1,0 +1,23 @@
+{
+  "name": "gemma",
+  "version": "1.0.0",
+  "description": "--- base_model: google/gemma-4-26B-A4B-it pipeline_tag: text-generation library_name: transformers language: - en license: apache-2.0 tags: - abliteration - uncensored - gemma-4 ---",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": ".\\.venv\\Scripts\\python.exe -m unittest discover -s tests -v",
+    "bench:agent": ".\\.venv\\Scripts\\python.exe -m benchmarks.agent_benchmarks.runner",
+    "bench:runtime": ".\\.venv\\Scripts\\python.exe benchmarks\\bench_runtime.py"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@openai/codex": "0.139.0",
+    "@upstash/context7-mcp": "^3.2.0"
+  }
+}

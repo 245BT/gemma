@@ -1,0 +1,1 @@
+{"id":"exact_digit_forced_reasoning_graph","request":{"prompt":"Reply with only the digit 4.","temperature":0.0,"max_tokens":8,"x_gemma_force_reasoning":true},"expected_exact":"4"}

@@ -1,0 +1,1 @@
+{"id":"exact_digit_plain_fastpath","request":{"prompt":"Reply with only the digit 4.","temperature":0.0,"max_tokens":8},"expected_exact":"4"}
