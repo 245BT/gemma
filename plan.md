@@ -28,4 +28,4 @@ Every behavior change gets a failing test first, a focused passing test after im
 ## Active Spec And Plan
 
 - Design: `docs/superpowers/specs/2026-06-14-gemma-controlled-big-bang-rebuild-design.md`
-- Implementation plan: pending user review of the design spec
+- Active implementation plan: `docs/superpowers/plans/2026-06-14-gemma-controlled-big-bang-runtime-phase-a.md`
