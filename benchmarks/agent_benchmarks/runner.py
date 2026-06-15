@@ -4,13 +4,13 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .registry import get_suite, list_suites
 from .results import normalize_result_file
+from .subprocesses import output_metadata, run_bounded_subprocess, write_redacted_output
 from .suites import codex_home, mode_args, model_slug, yolo_args
 
 
@@ -48,6 +48,8 @@ def build_execution_plan(root: str | Path, request: BenchmarkRequest) -> Executi
     suite = get_suite(request.suite)
     dataset = request.dataset or suite.default_dataset
     out_dir = Path(request.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = root / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_run_id = _safe_label(request.run_id)
     env = _benchmark_env(root, request)
@@ -60,6 +62,10 @@ def build_execution_plan(root: str | Path, request: BenchmarkRequest) -> Executi
         command = _terminal_bench_2_command(request, dataset)
     elif request.suite == "github-bugs":
         command = _github_bugs_command(root, request)
+    elif request.suite == "local-agent-behavior":
+        command = _local_agent_behavior_command(root, request)
+    elif request.suite == "local-repo-fix":
+        command = _local_repo_fix_command(root, request)
     else:  # pragma: no cover - guarded by get_suite
         raise ValueError(f"Unsupported benchmark suite {request.suite!r}")
 
@@ -81,26 +87,41 @@ def run_benchmark_request(root: str | Path, request: BenchmarkRequest) -> dict[s
     status = "dry_run" if request.dry_run else "not_run"
     return_code = None
     normalized = None
+    local_summary_path = None
+    if request.suite in {"local-agent-behavior", "local-repo-fix"}:
+        local_summary_path = _local_summary_path(
+            plan.stdout_path.parent,
+            request.run_id,
+            request.suite,
+        )
+        local_summary_path.unlink(missing_ok=True)
 
     if not request.dry_run:
         missing = missing_dependency(plan.command[0])
         if missing:
             status = "dependency_missing"
-            plan.stderr_path.write_text(missing + "\n", encoding="utf-8")
+            stdout_text = ""
+            stderr_text = missing + "\n"
+            write_redacted_output(plan.stdout_path, stdout_text)
+            write_redacted_output(plan.stderr_path, stderr_text)
+            stream_metadata = output_metadata(stdout_text, stderr_text)
         else:
-            completed = subprocess.run(
+            completed = run_bounded_subprocess(
                 plan.command,
                 cwd=Path(root),
                 env={**os.environ, **plan.env},
-                capture_output=True,
-                text=True,
                 timeout=request.timeout,
-                check=False,
             )
-            return_code = completed.returncode
-            status = "passed" if completed.returncode == 0 else "failed"
-            plan.stdout_path.write_text(completed.stdout, encoding="utf-8")
-            plan.stderr_path.write_text(completed.stderr, encoding="utf-8")
+            return_code = completed.return_code
+            status = "timeout" if completed.timed_out else "passed" if completed.return_code == 0 else "failed"
+            write_redacted_output(plan.stdout_path, completed.stdout)
+            write_redacted_output(plan.stderr_path, completed.stderr)
+            stream_metadata = output_metadata(completed.stdout, completed.stderr)
+
+            if local_summary_path is not None and local_summary_path.exists():
+                normalized = normalize_result_file(request.suite, local_summary_path)
+    else:
+        stream_metadata = output_metadata("", "")
 
     if request.result_path and Path(request.result_path).exists():
         normalized = normalize_result_file(request.suite, request.result_path)
@@ -120,6 +141,7 @@ def run_benchmark_request(root: str | Path, request: BenchmarkRequest) -> dict[s
         "summary_path": str(plan.summary_path),
         "stdout_path": str(plan.stdout_path),
         "stderr_path": str(plan.stderr_path),
+        **stream_metadata,
     }
     plan.summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
@@ -130,6 +152,10 @@ def missing_dependency(executable: str) -> str:
     if path.is_absolute() or len(path.parts) > 1:
         return "" if path.exists() else f"Missing executable: {executable}"
     return "" if shutil.which(executable) else f"Missing executable on PATH: {executable}"
+
+
+def _local_summary_path(out_dir: Path, run_id: str, suite: str) -> Path:
+    return out_dir / f"{_safe_label(run_id)}.{suite}.summary.json"
 
 
 def _benchmark_env(root: Path, request: BenchmarkRequest) -> dict[str, str]:
@@ -207,6 +233,38 @@ def _github_bugs_command(root: Path, request: BenchmarkRequest) -> list[str]:
     ]
 
 
+def _local_agent_behavior_command(root: Path, request: BenchmarkRequest) -> list[str]:
+    return [
+        str(root / ".venv" / "Scripts" / "python.exe"),
+        "-m",
+        "benchmarks.agent_benchmarks.local_behavior",
+        "--root",
+        str(root),
+        "--out-dir",
+        str(Path(request.out_dir)),
+        "--run-id",
+        request.run_id,
+    ]
+
+
+def _local_repo_fix_command(root: Path, request: BenchmarkRequest) -> list[str]:
+    return [
+        str(root / ".venv" / "Scripts" / "python.exe"),
+        "-m",
+        "benchmarks.agent_benchmarks.local_repo_fix",
+        "--root",
+        str(root),
+        "--out-dir",
+        str(Path(request.out_dir)),
+        "--run-id",
+        request.run_id,
+        "--solver",
+        "oracle",
+        "--timeout",
+        str(request.timeout),
+    ]
+
+
 def _split_terminal_dataset(dataset: str) -> tuple[str, str]:
     if "@" not in dataset:
         return dataset, "latest"
@@ -216,7 +274,7 @@ def _split_terminal_dataset(dataset: str) -> tuple[str, str]:
 
 def _safe_label(label: str) -> str:
     cleaned = "".join(character if character.isalnum() or character in "._-" else "-" for character in label)
-    return cleaned.strip("-") or "agent-benchmark"
+    return cleaned.strip("._-") or "agent-benchmark"
 
 
 def parse_args(argv=None):

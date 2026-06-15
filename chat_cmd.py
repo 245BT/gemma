@@ -172,14 +172,29 @@ def load_model_and_tokenizer(model_dir):
     return model, tokenizer
 
 
-def generate_reply(model, tokenizer, messages, max_new_tokens=512):
+def model_context_length(model):
+    config = getattr(model, "config", None)
+    candidates = [config, getattr(config, "text_config", None)]
+    for candidate in candidates:
+        value = getattr(candidate, "max_position_embeddings", None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def generate_reply(model, tokenizer, messages):
     inputs = tokenizer.apply_chat_template(
         messages,
         return_tensors="pt",
         add_generation_prompt=True,
     )
     inputs = inputs.to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    generation_kwargs = {}
+    context_length = model_context_length(model)
+    if context_length is not None:
+        # Avoid Transformers' short default while keeping generation bounded by model context.
+        generation_kwargs["max_length"] = context_length
+    outputs = model.generate(**inputs, **generation_kwargs)
     reply = tokenizer.decode(
         outputs[0][inputs["input_ids"].shape[1]:],
         skip_special_tokens=True,
@@ -187,15 +202,15 @@ def generate_reply(model, tokenizer, messages, max_new_tokens=512):
     return reply.strip()
 
 
-def run_once(prompt, model_dir=MODEL_DIR, max_new_tokens=512):
+def run_once(prompt, model_dir=MODEL_DIR):
     model, tokenizer = load_model_and_tokenizer(model_dir)
     messages = [{"role": "user", "content": prompt}]
-    reply = generate_reply(model, tokenizer, messages, max_new_tokens=max_new_tokens)
+    reply = generate_reply(model, tokenizer, messages)
     print(f"Gemma > {reply}", flush=True)
     return reply
 
 
-def run_chat(model_dir=MODEL_DIR, max_new_tokens=512, max_history_messages=16):
+def run_chat(model_dir=MODEL_DIR, max_history_messages=16):
     print("Loading Gemma model. This can take a little while on this GPU.", flush=True)
     model, tokenizer = load_model_and_tokenizer(model_dir)
     print("Ready. Commands: /exit, /clear, /info", flush=True)
@@ -228,7 +243,7 @@ def run_chat(model_dir=MODEL_DIR, max_new_tokens=512, max_history_messages=16):
 
         messages.append({"role": "user", "content": user_text})
         messages = trim_history(messages, max_history_messages)
-        reply = generate_reply(model, tokenizer, messages, max_new_tokens=max_new_tokens)
+        reply = generate_reply(model, tokenizer, messages)
         print(f"\nGemma > {reply}", flush=True)
         messages.append({"role": "assistant", "content": reply})
         messages = trim_history(messages, max_history_messages)
@@ -238,7 +253,6 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description="CMD chat loop for the local Gemma model.")
     parser.add_argument("--once", help="Run one prompt and exit.")
     parser.add_argument("--model-dir", default=str(MODEL_DIR), help="Path to the local model snapshot.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum tokens to generate per reply.")
     parser.add_argument("--max-history-messages", type=int, default=16, help="Recent chat messages to keep.")
     parser.add_argument("--info", action="store_true", help="Print local model identity and verification info.")
     return parser.parse_args(argv)
@@ -251,11 +265,10 @@ def main(argv=None):
         print(format_model_info(model_dir), flush=True)
         return 0
     if args.once:
-        run_once(args.once, model_dir=model_dir, max_new_tokens=args.max_new_tokens)
+        run_once(args.once, model_dir=model_dir)
         return 0
     run_chat(
         model_dir=model_dir,
-        max_new_tokens=args.max_new_tokens,
         max_history_messages=args.max_history_messages,
     )
     return 0

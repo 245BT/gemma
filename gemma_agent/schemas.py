@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import re
+
+from .safety import neutralize_runtime_markers
 
 
 @dataclass(frozen=True)
@@ -15,14 +18,49 @@ class ToolResult:
     elapsed_ms: float = 0
     executed: bool = False
 
-    def to_evidence(self) -> dict[str, Any]:
+    def to_evidence(self, safety_guard: Any | None = None) -> dict[str, Any]:
+        tool_name: Any = self.tool_name
+        args: Any = self.args
+        output: Any = self.output
+        error: Any = self.error
+        error_code: Any = self.error_code
+        rejected_tool_identifier = self.error_code == "tool_not_allowed" and not self.executed
+        if safety_guard is not None:
+            tool_name = (
+                safety_guard.wrap_untrusted_model_identifier(self.tool_name, field="tool_name")
+                if rejected_tool_identifier
+                else safety_guard.wrap_model_identifier(self.tool_name, field="tool_name")
+            )
+            args = safety_guard.wrap_untrusted_evidence(
+                safety_guard.safe_untrusted_metadata_source("tool_args", self.tool_name)
+                if rejected_tool_identifier
+                else safety_guard.safe_metadata_source("tool_args", self.tool_name),
+                self.args,
+                field="args",
+            )
+            if output is not None:
+                output = safety_guard.wrap_untrusted_output(
+                    self.tool_name,
+                    output,
+                    untrusted_tool_identifier=rejected_tool_identifier,
+                )
+            if error is not None:
+                error = safety_guard.wrap_untrusted_tool_error(
+                    self.tool_name,
+                    error,
+                    untrusted_tool_identifier=rejected_tool_identifier,
+                )
+            if error_code is not None:
+                error_code = _model_facing_error_code(error_code, safety_guard)
+        else:
+            error_code = neutralize_runtime_markers(error_code)
         return {
-            "tool_name": self.tool_name,
-            "args": self.args,
+            "tool_name": tool_name,
+            "args": args,
             "ok": self.ok,
-            "output": self.output,
-            "error": self.error,
-            "error_code": self.error_code,
+            "output": output,
+            "error": error,
+            "error_code": error_code,
             "elapsed_ms": self.elapsed_ms,
             "executed": self.executed,
         }
@@ -54,6 +92,14 @@ class ThinkingSummary:
             next_action=str(value.get("next_action", value.get("next action", ""))),
         )
 
+    @classmethod
+    def validate_mapping(cls, value: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        for key in value:
+            if _is_forbidden_summary_key(key):
+                errors.append("forbidden thinking_summary key is not allowed")
+        return errors
+
     def validate(self) -> list[str]:
         errors: list[str] = []
         if not self.goal:
@@ -68,6 +114,10 @@ class ThinkingSummary:
             errors.append("confidence must be low, medium, or high")
         if not self.next_action:
             errors.append("next_action is required")
+        if _contains_sensitive_summary_content(self.format_lines()):
+            errors.append("sensitive raw prompt or chain-of-thought content is not allowed")
+        if any(len(line) > 1000 for line in self.format_lines()):
+            errors.append("thinking_summary fields must be concise")
         return errors
 
     def format_lines(self) -> list[str]:
@@ -90,14 +140,37 @@ class SubAgentResult:
     error: str | None = None
     tool_results: list[ToolResult] = field(default_factory=list)
 
-    def to_evidence(self) -> dict[str, Any]:
+    def to_evidence(self, safety_guard: Any | None = None) -> dict[str, Any]:
+        agent_id: Any = self.agent_id
+        task: Any = self.task
+        final: Any = self.final
+        error: Any = self.error
+        if safety_guard is not None:
+            source = safety_guard.safe_metadata_source("subagent", self.agent_id)
+            agent_id = safety_guard.wrap_model_identifier(self.agent_id, field="agent_id")
+            task = safety_guard.wrap_untrusted_evidence(
+                source,
+                self.task,
+                field="task",
+            )
+            final = safety_guard.wrap_untrusted_evidence(
+                source,
+                self.final,
+                field="final",
+            )
+            if error is not None:
+                error = safety_guard.wrap_untrusted_evidence(
+                    source,
+                    error,
+                    field="error",
+                )
         return {
-            "agent_id": self.agent_id,
-            "task": self.task,
-            "final": self.final,
+            "agent_id": agent_id,
+            "task": task,
+            "final": final,
             "ok": self.ok,
-            "error": self.error,
-            "tool_results": [item.to_evidence() for item in self.tool_results],
+            "error": error,
+            "tool_results": [item.to_evidence(safety_guard) for item in self.tool_results],
         }
 
 
@@ -117,3 +190,46 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+_TRUSTED_MODEL_FACING_ERROR_CODES = {
+    "invalid_json",
+    "path_validation_error",
+    "stalled",
+    "timeout",
+    "tool_exception",
+    "tool_failed",
+    "tool_not_allowed",
+    "tool_spawn_error",
+    "validation_error",
+}
+
+
+def _model_facing_error_code(error_code: Any, safety_guard: Any) -> Any:
+    if isinstance(error_code, str):
+        normalized = error_code.strip().lower().replace("-", "_")
+        if normalized in _TRUSTED_MODEL_FACING_ERROR_CODES:
+            return normalized
+    return safety_guard.wrap_untrusted_evidence(
+        "tool_error_code",
+        error_code,
+        field="error_code",
+    )
+
+
+_SENSITIVE_SUMMARY_RE = re.compile(
+    r"\b(raw[\s_-]+chain[\s_-]+of[\s_-]+thought|hidden[\s_-]+reasoning|"
+    r"system[\s_-]+prompt|developer[\s_-]+message|"
+    r"session\s+log|history\.jsonl|prompt\s+text)\b",
+    re.IGNORECASE,
+)
+_FORBIDDEN_SUMMARY_KEYS = {"raw_chain_of_thought", "system_prompt"}
+
+
+def _contains_sensitive_summary_content(lines: list[str]) -> bool:
+    return any(_SENSITIVE_SUMMARY_RE.search(line) for line in lines)
+
+
+def _is_forbidden_summary_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+    return normalized in _FORBIDDEN_SUMMARY_KEYS

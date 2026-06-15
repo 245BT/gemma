@@ -17,6 +17,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Local Gemma/Codex runtime artifacts
+.superpowers/
+.worktrees/
 .codex-local*/
 .codex-smoke-agent/
 .codex-son-yolo-smoke/

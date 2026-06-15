@@ -1,5 +1,11 @@
 # AGENTS.md Init
 
+## IMPORTANT AFTER EACH FINISH
+
+make sure this change effect son, sonion, operator, and son --reasoing, sonion --reasoning and operator --reasoing,
+      and son --reasoing --yolo and sonion --reasoning --yolo, and operator --reasoing --yolo, and son --yolo, sonion
+      --yolo, operator --yolo. and verify things once again, make sure there is only 1 running llama server no two or
+  more
 ## Purpose
 
 This file is the startup contract for work in this local Gemma coding and research agent
@@ -15,27 +21,56 @@ gives a more specific instruction.
 5. Use tests, benchmarks, or static checks as the completion gate.
 6. Report measured facts, caveats, and reproduction commands.
 
+## Required Work Discipline
+
+For substantial coding-agent, runtime, benchmark, research, or workflow work, follow the same
+discipline used in the Composer 2 Gamma hardening pass:
+
+- Stay with the task end-to-end. Do not stop at analysis, partial fixes, or vague next steps when
+  implementation and verification are feasible in the current session.
+- Work skill-first: identify triggered workflow skills, read the relevant skill instructions, and apply
+  them before changing code or behavior.
+- Use systematic debugging for bugs and unexpected behavior: reproduce the symptom, inspect
+  evidence, isolate the root cause, make the smallest justified fix, and verify the original symptom.
+- Use test-driven development for production behavior changes: add or update a focused failing
+  test first, confirm the failure, implement the fix, then rerun the focused and affected suites.
+- Use subagent-driven development or subagent review when independent work can run in parallel
+  without overlapping write scopes. Delegated tasks must have narrow context, explicit ownership,
+  and their reports must be independently reviewed before claims are made.
+- Keep progress moving on large tasks. While subagents, benchmarks, installs, or long commands
+  run, continue with non-overlapping work instead of waiting blindly.
+- Treat terminal behavior as part of the product. Detect timeouts, idle commands, repeated
+  failures, low-progress loops, and frozen processes; stop, inspect partial output, summarize the
+  finding, and choose a better action.
+- Benchmark serious changes before and after when scope allows. Store reproducible commands,
+  summaries, pass rates, latency, token/tool counters, and failure modes.
+- Use verification-before-completion before any success claim. Fresh command output, benchmark
+  summaries, or static-check evidence must exist before reporting that work is fixed, passing, or
+  complete.
+- Report caveats honestly. If a full external benchmark or live model rollout was not run, say so and
+  distinguish verified implementation from unverified expected behavior.
+
 ## Development Skills
 
+- Check available workflow skills at the start of each task, then read only the triggered or
+  applicable skill bodies. Do not load unrelated full skill files when the task does not need them.
 - Use `using-superpowers` at conversation start when available.
-- Use `brainstorming` before creative or architectural work.
-- Use `systematic-debugging` before bug fixes or unexpected behavior changes.
-- Use `test-driven-development` before production behavior changes.
+- Use `brainstorming` before creative, architectural, behavior, or workflow changes.
+- Use `writing-plans` before multi-step implementation work.
+- Use `using-git-worktrees` before executing implementation plans in isolated workspaces.
+- Use `systematic-debugging` before bug fixes, test failures, build failures, or unexpected
+  behavior changes.
+- Use `test-driven-development` before production behavior changes, bug fixes, or refactors.
 - Use `code-simplifier` for behavior-preserving cleanup.
+- Use `subagent-driven-development` when executing independent implementation-plan tasks and
+  subagent tooling is available.
+- Use `executing-plans` as the fallback for written plans when subagent-driven execution is not
+  appropriate.
+- Use `dispatching-parallel-agents` for multiple independent investigations or review tasks.
+- Use `requesting-code-review` after major tasks, subagent tasks, and before merge.
+- Use `finishing-a-development-branch` once implementation is complete and tests pass.
 - Use `verification-before-completion` before completion reports.
 - Use self-review and final verification for any broad change.
-
-## Sub-Agent Policy
-
-- The product goal is Gemma-owned sub-agent capability inside the local runtime.
-- Codex subagents are development helpers only; do not describe them as Gemma runtime
-  subagents.
-- For independent implementation or review tasks, use sub-agent driven development when the
-  tooling is available and the write scopes do not overlap.
-- Preferred development reviewer profile: GPT-5.5 xhigh where available; otherwise use the most
-  capable available reviewer.
-- Each delegated task needs narrow context, explicit ownership, spec review, and code-quality
-  review.
 
 ## Non-Negotiable Constraints
 
@@ -76,11 +111,10 @@ gives a more specific instruction.
 Show concise summaries, never raw chain-of-thought:
 
 - Goal: current objective.
-- Plan: 2 to 5 high-level steps.
+- Plan: 2 to 10 high-level steps.
 - Evidence: tools, files, sources, or tests inspected.
 - Current finding: concrete partial result.
 - Confidence: low, medium, or high.
-- Next action: immediate next step.
 
 Do not store hidden chain-of-thought in logs, traces, prompts, caches, or test artifacts.
 

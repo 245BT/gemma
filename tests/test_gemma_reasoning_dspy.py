@@ -66,6 +66,7 @@ class DspyProgramsTests(unittest.TestCase):
         self.assertEqual(args[0], "openai/gemma-4-26b-a4b-it-uncensored-q4-k-m")
         self.assertEqual(kwargs["api_base"], "http://127.0.0.1:8081/v1")
         self.assertEqual(kwargs["api_key"], "local-gemma-placeholder")
+        self.assertNotIn("max_tokens", kwargs)
         self.assertIsNotNone(fake_dspy.context_lm)
         self.assertEqual(verifier, {"approved": True, "notes": "configured notes"})
         self.assertEqual(fake_dspy.predict_kwargs[-1]["constraints"], "instruction constraint")

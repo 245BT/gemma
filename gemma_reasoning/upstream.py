@@ -2,11 +2,13 @@ import copy
 import json
 from urllib.request import Request, urlopen
 
+from gemma_response_proxy import proxy_timeout_seconds
+
 
 class UpstreamResponsesClient:
-    def __init__(self, upstream="http://127.0.0.1:8081", timeout=120):
+    def __init__(self, upstream="http://127.0.0.1:8081", timeout=None):
         self.upstream = upstream.rstrip("/")
-        self.timeout = timeout
+        self.timeout = proxy_timeout_seconds() if timeout is None else timeout
 
     def create_response(self, payload):
         request_payload = copy.deepcopy(payload)

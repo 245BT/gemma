@@ -1,22 +1,27 @@
 import argparse
-import copy
 import json
 import re
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from gemma_response_proxy import clean_channel_markers
+from gemma_response_proxy import (
+    UPSTREAM_TIMEOUT_MESSAGE,
+    clean_channel_markers,
+    clean_response_payload,
+    clean_sse_payload,
+    proxy_timeout_seconds,
+)
 
 
 HOST = "127.0.0.1"
 PORT = 8082
 UPSTREAM = "http://127.0.0.1:8081"
-UPSTREAM_TIMEOUT_SECONDS = 120
-FAST_PATH_MAX_OUTPUT_TOKENS = 32
+UPSTREAM_TIMEOUT_SECONDS = proxy_timeout_seconds()
 FAST_PATH_MAX_PROMPT_CHARS = 200
+SIMPLE_DIRECT_MAX_PROMPT_CHARS = 240
 FAST_PATH_EXACT_OUTPUT_RE = re.compile(
     r"\b(?:reply|respond|answer|output|return|print|say)\s+"
     r"(?:with\s+)?(?:only|exactly)\b",
@@ -25,11 +30,15 @@ FAST_PATH_EXACT_OUTPUT_RE = re.compile(
 FAST_PATH_COMPLEX_RE = re.compile(
     r"\b("
     r"research|search|browse|latest|cite|citation|source|"
-    r"edit|debug|fix|modify|implement|refactor|test|"
+    r"create|edit|debug|fix|modify|implement|refactor|test|"
     r"tool|tools|subagent|sub-agent|"
     r"reasoning|reason|think|deep|deeply|plan|planning|verify|verification|"
     r"benchmark|measure|optimize|compare"
     r")\b",
+    re.IGNORECASE,
+)
+SIMPLE_DIRECT_REASONING_RE = re.compile(
+    r"\b(why|cause|caused|explain|analy[sz]e|investigate|exactly)\b",
     re.IGNORECASE,
 )
 PUBLIC_ERROR_MESSAGE = "Reasoning proxy request failed."
@@ -64,7 +73,14 @@ def build_response_payload(final_text, response_id=None, model=None, metadata=No
     if model:
         payload["model"] = model
     if isinstance(metadata, dict):
-        for key in ("usage", "model_calls", "context_length", "cache_hit", "cache_hit_rate"):
+        for key in (
+            "usage",
+            "model_calls",
+            "context_length",
+            "cache_hit",
+            "cache_hit_rate",
+            "reasoning_mode",
+        ):
             if key in metadata:
                 payload[key] = metadata[key]
     return payload
@@ -153,6 +169,25 @@ def build_error_payload(_error=None):
     }
 
 
+def build_timeout_payload():
+    return {
+        "error": {
+            "message": UPSTREAM_TIMEOUT_MESSAGE,
+            "type": "reasoning_proxy_timeout",
+        }
+    }
+
+
+def is_wrapped_timeout_error(exc):
+    return isinstance(exc, TimeoutError) or (
+        isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)
+    )
+
+
+def build_bad_gateway_payload():
+    return build_error_payload()
+
+
 def _content_to_text(content):
     if isinstance(content, str):
         return content
@@ -169,6 +204,36 @@ def _content_to_text(content):
         if "content" in content:
             return _content_to_text(content["content"])
     return ""
+
+
+def normalize_response_payload(payload):
+    if not isinstance(payload, dict):
+        return payload
+    normalized = clean_response_payload(payload)
+    output_text = normalized.get("output_text")
+    if isinstance(output_text, str):
+        normalized["output_text"] = clean_channel_markers(output_text)
+        return normalized
+    text = _response_output_text(normalized)
+    if text:
+        normalized["output_text"] = clean_channel_markers(text)
+    return normalized
+
+
+def _response_output_text(payload):
+    output = payload.get("output")
+    if isinstance(output, list):
+        parts = []
+        for item in output:
+            if isinstance(item, dict):
+                text = _content_to_text(item.get("content", item))
+            else:
+                text = _content_to_text(item)
+            if text:
+                parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    return _content_to_text(payload.get("content", ""))
 
 
 def latest_user_task_text(payload):
@@ -193,23 +258,12 @@ def latest_user_task_text(payload):
     return ""
 
 
-def _small_output_cap(payload):
-    token_cap = payload.get("max_output_tokens", payload.get("max_tokens"))
-    if token_cap is None:
-        return False
-    try:
-        token_cap = int(token_cap)
-    except (TypeError, ValueError):
-        return False
-    return 0 < token_cap <= FAST_PATH_MAX_OUTPUT_TOKENS
-
-
 def should_use_direct_fast_path(payload):
     if not isinstance(payload, dict):
         return False
     if payload.get(FORCE_REASONING_FIELD):
         return False
-    return _is_simple_exact_output_payload(payload)
+    return _is_simple_exact_output_payload(payload) or _is_simple_direct_payload(payload)
 
 
 def should_use_lightweight_reasoning(payload):
@@ -221,11 +275,7 @@ def should_use_lightweight_reasoning(payload):
 
 
 def _is_simple_exact_output_payload(payload):
-    if payload.get("stream"):
-        return False
-    if payload.get("tool_choice") or payload.get("parallel_tool_calls"):
-        return False
-    if not _small_output_cap(payload):
+    if payload.get("tool_choice"):
         return False
 
     task = latest_user_task_text(payload).strip()
@@ -238,11 +288,60 @@ def _is_simple_exact_output_payload(payload):
     return bool(FAST_PATH_EXACT_OUTPUT_RE.search(lower_task))
 
 
+def _is_simple_direct_payload(payload):
+    if payload.get("tool_choice"):
+        return False
+
+    task = latest_user_task_text(payload).strip()
+    if not task or len(task) > SIMPLE_DIRECT_MAX_PROMPT_CHARS:
+        return False
+    if "\n" in task:
+        return False
+    lower_task = task.lower()
+    if FAST_PATH_COMPLEX_RE.search(lower_task):
+        return False
+    if SIMPLE_DIRECT_REASONING_RE.search(lower_task):
+        return False
+    return True
+
+
 def fast_path_payload(payload):
-    forwarded = copy.deepcopy(payload)
+    forwarded = dict(payload)
     for key in ("tools", "parallel_tool_calls", FORCE_REASONING_FIELD):
         forwarded.pop(key, None)
+    forwarded["stream"] = False
     return forwarded
+
+
+def prepare_reasoning_payload(payload):
+    prepared = dict(payload)
+    for key in ("tools", "parallel_tool_calls", FORCE_REASONING_FIELD):
+        prepared.pop(key, None)
+    return prepared
+
+
+def should_raw_forward_tool_request(payload):
+    if not isinstance(payload, dict):
+        return False
+    if _tool_choice_selects_tool(payload.get("tool_choice")):
+        return True
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        if tools:
+            return not should_use_direct_fast_path(payload)
+    elif tools:
+        return not should_use_direct_fast_path(payload)
+    return False
+
+
+def _tool_choice_selects_tool(tool_choice):
+    if isinstance(tool_choice, (dict, list)):
+        return bool(tool_choice)
+    if tool_choice is None:
+        return False
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() not in {"", "none", "auto"}
+    return bool(tool_choice)
 
 
 def forward_response_to_upstream(request_payload, upstream=UPSTREAM):
@@ -257,6 +356,70 @@ def forward_response_to_upstream(request_payload, upstream=UPSTREAM):
         return json.loads(response.read().decode("utf-8"))
 
 
+def forward_raw_response_to_upstream(request_payload, upstream=UPSTREAM):
+    body = json.dumps(request_payload).encode("utf-8")
+    request = Request(
+        upstream.rstrip("/") + "/v1/responses",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=UPSTREAM_TIMEOUT_SECONDS) as response:
+            return (
+                response.status,
+                response.read(),
+                response.headers.get("Content-Type", "application/json"),
+            )
+    except TimeoutError:
+        return (
+            504,
+            json.dumps(build_timeout_payload()).encode("utf-8"),
+            "application/json",
+        )
+    except HTTPError as exc:
+        return (
+            exc.code,
+            exc.read(),
+            exc.headers.get("Content-Type", "application/json"),
+        )
+    except URLError as exc:
+        if is_wrapped_timeout_error(exc):
+            return (
+                504,
+                json.dumps(build_timeout_payload()).encode("utf-8"),
+                "application/json",
+            )
+        return (
+            502,
+            json.dumps(build_bad_gateway_payload()).encode("utf-8"),
+            "application/json",
+        )
+    except OSError:
+        return (
+            502,
+            json.dumps(build_bad_gateway_payload()).encode("utf-8"),
+            "application/json",
+        )
+
+
+def sanitize_forwarded_response_body(body, content_type):
+    if content_type.startswith("application/json"):
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return body
+        if not isinstance(payload, dict):
+            return body
+        return json.dumps(clean_response_payload(payload)).encode("utf-8")
+    if content_type.startswith("text/event-stream"):
+        try:
+            return clean_sse_payload(body)
+        except UnicodeDecodeError:
+            return body
+    return body
+
+
 def run_reasoning_request(request_payload, graph_runner=None, upstream=UPSTREAM):
     if graph_runner is None:
         from gemma_reasoning.dspy_programs import LocalHeuristicPrograms
@@ -264,19 +427,17 @@ def run_reasoning_request(request_payload, graph_runner=None, upstream=UPSTREAM)
         from gemma_reasoning.graph import ReasoningConfig
         from gemma_reasoning.upstream import UpstreamResponsesClient
 
-        client = UpstreamResponsesClient(upstream)
-        if should_use_lightweight_reasoning(request_payload):
-            programs = LocalHeuristicPrograms()
-            config = ReasoningConfig(use_langgraph=False)
-            graph_runner = lambda payload: run_reasoning_graph(
-                payload,
-                client=client,
-                programs=programs,
-                config=config,
-            )
-        else:
-            graph_runner = lambda payload: run_reasoning_graph(payload, client=client)
-    result = graph_runner(request_payload)
+        client = UpstreamResponsesClient(upstream, timeout=UPSTREAM_TIMEOUT_SECONDS)
+        programs = LocalHeuristicPrograms()
+        config = ReasoningConfig(max_revisions=0, use_langgraph=False)
+        graph_runner = lambda payload: run_reasoning_graph(
+            payload,
+            client=client,
+            programs=programs,
+            config=config,
+        )
+    result = graph_runner(prepare_reasoning_payload(request_payload))
+    result.setdefault("reasoning_mode", "single_pass_local_plan")
     return build_response_payload(
         result.get("final_text", ""),
         model=request_payload.get("model"),
@@ -308,15 +469,33 @@ class ReasoningProxyHandler(BaseHTTPRequestHandler):
     def handle_reasoning_response(self):
         try:
             payload = self.read_json_body()
+            if should_raw_forward_tool_request(payload):
+                status, body, content_type = forward_raw_response_to_upstream(payload, upstream=self.upstream)
+                body = sanitize_forwarded_response_body(body, content_type)
+                self.send_bytes(status, body, content_type)
+                return
             if should_use_direct_fast_path(payload):
-                response = forward_response_to_upstream(fast_path_payload(payload), upstream=self.upstream)
+                response = normalize_response_payload(
+                    forward_response_to_upstream(fast_path_payload(payload), upstream=self.upstream)
+                )
             else:
                 response = run_reasoning_request(payload, upstream=self.upstream)
             if payload.get("stream"):
-                body = build_sse_payload(response["output"][0]["content"][0]["text"], model=payload.get("model"))
+                body = build_sse_payload(response.get("output_text", ""), model=payload.get("model"))
                 self.send_bytes(200, body, "text/event-stream")
             else:
                 self.send_json(200, response)
+        except TimeoutError:
+            self.send_json(504, build_timeout_payload())
+        except HTTPError as exc:
+            self.send_json(exc.code, build_bad_gateway_payload())
+        except URLError as exc:
+            if is_wrapped_timeout_error(exc):
+                self.send_json(504, build_timeout_payload())
+            else:
+                self.send_json(502, build_bad_gateway_payload())
+        except OSError:
+            self.send_json(502, build_bad_gateway_payload())
         except Exception as exc:
             self.send_json(500, build_error_payload(exc))
 
@@ -338,10 +517,26 @@ class ReasoningProxyHandler(BaseHTTPRequestHandler):
                 status = response.status
                 response_body = response.read()
                 content_type = response.headers.get("Content-Type", "application/json")
+        except TimeoutError:
+            status = 504
+            response_body = json.dumps(build_timeout_payload()).encode("utf-8")
+            content_type = "application/json"
         except HTTPError as exc:
             status = exc.code
             response_body = exc.read()
             content_type = exc.headers.get("Content-Type", "application/json")
+        except URLError as exc:
+            if is_wrapped_timeout_error(exc):
+                status = 504
+                response_body = json.dumps(build_timeout_payload()).encode("utf-8")
+            else:
+                status = 502
+                response_body = json.dumps(build_bad_gateway_payload()).encode("utf-8")
+            content_type = "application/json"
+        except OSError:
+            status = 502
+            response_body = json.dumps(build_bad_gateway_payload()).encode("utf-8")
+            content_type = "application/json"
         self.send_bytes(status, response_body, content_type)
 
     def send_json(self, status, payload):

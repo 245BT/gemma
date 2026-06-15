@@ -9,8 +9,51 @@ DEFAULT_API_KEY = "local-gemma-placeholder"
 
 
 class LocalHeuristicPrograms:
-    def plan(self, _task: str, _constraints: list[str]) -> str:
-        return "Answer the task directly."
+    def plan(self, task: str, constraints: list[str]) -> str:
+        task_text = str(task or "")
+        lower_task = task_text.lower()
+        if not constraints and len(task_text.strip()) <= 32 and not any(
+            marker in lower_task
+            for marker in (
+                "why",
+                "how",
+                "debug",
+                "fix",
+                "implement",
+                "research",
+                "compare",
+                "benchmark",
+                "measure",
+            )
+        ):
+            return "Answer the task directly."
+
+        steps = [
+            "Identify the user's concrete deliverable and avoid solving a different task.",
+            "Use concise internal reasoning; return only the final useful answer.",
+            "Follow higher-priority instructions and project constraints over this plan.",
+        ]
+        if any(marker in lower_task for marker in ("debug", "bug", "stall", "timeout", "hang", "fail", "error")):
+            steps.extend(
+                [
+                    "Separate symptoms from root cause and explain the evidence used.",
+                    "Prefer one scoped fix that addresses the verified cause.",
+                ]
+            )
+        if any(marker in lower_task for marker in ("code", "implement", "edit", "fix", "refactor", "test")):
+            steps.extend(
+                [
+                    "Respect the existing code structure and keep changes narrowly scoped.",
+                    "State the verification command or result needed to prove the change.",
+                ]
+            )
+        if any(marker in lower_task for marker in ("research", "latest", "cite", "source", "compare")):
+            steps.append("Use only provided or verified sources, and mark unsupported claims as unverified.")
+        if any(marker in lower_task for marker in ("benchmark", "measure", "latency", "speed", "optimize")):
+            steps.append("Report measured before/after facts separately from hypotheses.")
+        if constraints:
+            steps.append("Apply the supplied constraints without quoting hidden or private reasoning.")
+        return "\n".join(f"- {step}" for step in steps)
 
     def verify(
         self,
@@ -32,12 +75,10 @@ class DspyPrograms:
         model: str = DEFAULT_MODEL,
         api_base: str = DEFAULT_API_BASE,
         api_key: str = DEFAULT_API_KEY,
-        max_tokens: int = 512,
     ) -> None:
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
-        self.max_tokens = max_tokens
         self._dspy: Any | None = None
         self._lm: Any | None = None
         self._planner: Any | None = None
@@ -92,7 +133,6 @@ class DspyPrograms:
             api_base=self.api_base,
             api_key=self.api_key,
             model_type="responses",
-            max_tokens=self.max_tokens,
         )
         return self._lm
 

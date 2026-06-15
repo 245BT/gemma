@@ -18,6 +18,18 @@ SENSITIVE_FILE_PATTERNS = (
     "goals_*.sqlite*",
     "sandbox.*.log",
 )
+PROJECT_SENSITIVE_FILE_PATTERNS = (
+    "benchmarks/runs/**/*.events.jsonl",
+    "benchmarks/runs/**/*.stdout.log",
+    "benchmarks/runs/**/*.stderr.log",
+    "benchmarks/runs/**/*.out.log",
+    "benchmarks/runs/**/*.err.log",
+    "llama-server*.log",
+    "gemma-proxy*.log",
+    "gemma-reasoning-proxy*.log",
+    "run.out.txt",
+    "run.err.txt",
+)
 
 
 def find_artifact_paths(root: str | Path) -> list[Path]:
@@ -32,6 +44,11 @@ def find_artifact_paths(root: str | Path) -> list[Path]:
                 resolved = path.resolve()
                 if path.is_file() and _is_relative_to(resolved, home):
                     paths[resolved] = None
+    for pattern in PROJECT_SENSITIVE_FILE_PATTERNS:
+        for path in root_path.glob(pattern):
+            resolved = path.resolve()
+            if path.is_file() and _is_relative_to(resolved, root_path):
+                paths[resolved] = None
     return sorted(paths)
 
 

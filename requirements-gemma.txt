@@ -5,3 +5,4 @@ transformers==5.11.0
 torch==2.11.0+cu128
 psutil==7.2.2
 tiktoken==0.12.0
+Pillow==12.0.0

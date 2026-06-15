@@ -7,6 +7,15 @@ import chat_cmd
 
 
 class ChatCmdTests(unittest.TestCase):
+    def test_huggingface_entrypoints_do_not_set_output_token_caps(self):
+        root = Path(chat_cmd.__file__).resolve().parent
+
+        for relative_path in ("chat_cmd.py", "run_readme.py", "README.hf.md"):
+            source = (root / relative_path).read_text(encoding="utf-8")
+            with self.subTest(path=relative_path):
+                self.assertNotIn("max_new_tokens", source)
+                self.assertNotIn("--max-new-tokens", source)
+
     def test_normalize_command_handles_known_commands(self):
         self.assertEqual(chat_cmd.normalize_command(" /exit "), "/exit")
         self.assertEqual(chat_cmd.normalize_command("/quit"), "/exit")
@@ -17,6 +26,52 @@ class ChatCmdTests(unittest.TestCase):
     def test_trim_history_keeps_recent_messages(self):
         messages = [{"role": "user", "content": str(i)} for i in range(6)]
         self.assertEqual(chat_cmd.trim_history(messages, max_messages=4), messages[-4:])
+
+    def test_generate_reply_uses_model_context_length_without_new_token_cap(self):
+        captured = {}
+
+        class FakeIds:
+            shape = (1, 1)
+
+        class FakeInputs(dict):
+            def __init__(self):
+                super().__init__({"input_ids": FakeIds()})
+
+            def to(self, _device):
+                return self
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, return_tensors, add_generation_prompt):
+                self.messages = messages
+                self.return_tensors = return_tensors
+                self.add_generation_prompt = add_generation_prompt
+                return FakeInputs()
+
+            def decode(self, tokens, skip_special_tokens):
+                self.tokens = tokens
+                self.skip_special_tokens = skip_special_tokens
+                return "ok"
+
+        class FakeConfig:
+            max_position_embeddings = 123
+
+        class FakeModel:
+            device = "cpu"
+            config = FakeConfig()
+
+            def generate(self, **kwargs):
+                captured.update(kwargs)
+                return [[1, 2, 3]]
+
+        reply = chat_cmd.generate_reply(
+            FakeModel(),
+            FakeTokenizer(),
+            [{"role": "user", "content": "hello"}],
+        )
+
+        self.assertEqual(reply, "ok")
+        self.assertEqual(captured["max_length"], 123)
+        self.assertNotIn("max_new_tokens", captured)
 
     def test_load_local_model_metadata_reads_config_and_index(self):
         with tempfile.TemporaryDirectory() as tmp:
