@@ -5,6 +5,8 @@ import json
 from typing import Any, Callable, Protocol
 from urllib.request import Request, urlopen as urllib_urlopen
 
+from gemma_response_proxy import proxy_timeout_seconds
+
 
 class ModelClient(Protocol):
     def create_response(self, payload: dict[str, Any]) -> Any:
@@ -17,12 +19,12 @@ class LocalResponsesClient:
         *,
         base_url: str = "http://127.0.0.1:8081/v1",
         model: str | None = None,
-        timeout: float = 120,
+        timeout: float | None = None,
         urlopen: Callable[..., Any] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.timeout = timeout
+        self.timeout = proxy_timeout_seconds() if timeout is None else timeout
         self._urlopen = urllib_urlopen if urlopen is None else urlopen
 
     def create_response(self, payload: dict[str, Any]) -> Any:

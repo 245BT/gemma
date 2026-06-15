@@ -1,4 +1,6 @@
 import inspect
+import io
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -125,8 +127,8 @@ SOURCE_COMPARISON_HTML = """
 <html>
   <body>
     <div class="result">
-      <a class="result__a" href="https://developers.openai.com/codex/pricing">Pricing - Codex | OpenAI Developers</a>
-      <div class="result__snippet">Fast mode consumes credits at a higher rate for supported models.</div>
+      <a class="result__a" href="https://example.com/city-museum/pricing">City Museum Pricing</a>
+      <div class="result__snippet">General admission tickets use timed entry and discount rates.</div>
     </div>
   </body>
 </html>
@@ -442,12 +444,12 @@ class DuckDuckGoMCPTests(unittest.TestCase):
 
     def test_structured_response_accepts_source_comparison_without_optional_words(self):
         response = duckduckgo_mcp.search_duckduckgo_response(
-            "OpenAI Codex pricing fast mode credits rate official",
+            "City Museum pricing discount rates official",
             fetcher=lambda query, timeout=15: SOURCE_COMPARISON_HTML,
         )
 
         self.assertEqual(response["status"], "ok")
-        self.assertEqual(response["citations"][0]["url"], "https://developers.openai.com/codex/pricing")
+        self.assertEqual(response["citations"][0]["url"], "https://example.com/city-museum/pricing")
 
     def test_structured_response_does_not_require_year_token_match(self):
         response = duckduckgo_mcp.search_duckduckgo_response(
@@ -476,6 +478,114 @@ class DuckDuckGoMCPTests(unittest.TestCase):
         self.assertEqual(response["status"], "unavailable")
         self.assertIn("unavailable", response["message"].lower())
 
+    def test_structured_response_blocks_software_install_queries_before_fetch(self):
+        def failing_fetcher(query, timeout=15, recency_days=None):
+            raise AssertionError("DuckDuckGo must not fetch software install queries")
+
+        for query in (
+            "install nmap windows",
+            "nmap windows latest version",
+            "nmap release notes",
+            "latest python version",
+        ):
+            with self.subTest(query=query):
+                response = duckduckgo_mcp.search_duckduckgo_response(
+                    query,
+                    fetcher=failing_fetcher,
+                )
+
+                self.assertEqual(response["status"], "blocked_by_policy")
+                self.assertIn("Context7", response["message"])
+                self.assertEqual(response["results"], [])
+
+    def test_structured_response_blocks_software_subject_coding_intent_before_fetch(self):
+        def failing_fetcher(query, timeout=15, recency_days=None):
+            raise AssertionError("DuckDuckGo must not fetch software coding queries")
+
+        for query in (
+            "Python list comprehension examples",
+            "Django queryset filter",
+            "GitHub Actions workflow yaml",
+        ):
+            with self.subTest(query=query):
+                response = duckduckgo_mcp.search_duckduckgo_response(
+                    query,
+                    fetcher=failing_fetcher,
+                )
+
+                self.assertEqual(response["status"], "blocked_by_policy")
+                self.assertIn("Context7", response["message"])
+                self.assertEqual(response["results"], [])
+
+    def test_duckduckgo_news_queries_remain_allowed(self):
+        response = duckduckgo_mcp.search_duckduckgo_response(
+            "Alpha Result latest news",
+            fetcher=lambda query, timeout=15, recency_days=None: SAMPLE_HTML,
+        )
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["query"], "Alpha Result latest news")
+
+    def test_public_news_and_person_queries_with_software_subjects_remain_allowed(self):
+        queries = [
+            "GitHub CEO 2026 news",
+            "Python creator biography",
+            "OpenAI Codex public announcement 2026",
+        ]
+
+        def matching_fetcher(query, timeout=15, recency_days=None):
+            return f"""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/public-info">{query}</a>
+                  <div class="result__snippet">{query} public information.</div>
+                </div>
+              </body>
+            </html>
+            """
+
+        for query in queries:
+            with self.subTest(query=query):
+                response = duckduckgo_mcp.search_duckduckgo_response(
+                    query,
+                    fetcher=matching_fetcher,
+                )
+
+                self.assertEqual(response["status"], "ok")
+                self.assertEqual(response["query"], query)
+                self.assertEqual(response["results"][0]["url"], "https://example.com/public-info")
+
+    def test_public_info_queries_with_generic_software_words_remain_allowed(self):
+        queries = [
+            "download passport renewal form",
+            "hospital error rates news",
+            "IRS tax form version 2026",
+        ]
+
+        def matching_fetcher(query, timeout=15, recency_days=None):
+            return f"""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/public-info">{query}</a>
+                  <div class="result__snippet">{query} public information.</div>
+                </div>
+              </body>
+            </html>
+            """
+
+        for query in queries:
+            with self.subTest(query=query):
+                response = duckduckgo_mcp.search_duckduckgo_response(
+                    query,
+                    fetcher=matching_fetcher,
+                )
+
+                self.assertEqual(response["status"], "ok")
+                self.assertEqual(response["query"], query)
+                self.assertEqual(response["results"][0]["url"], "https://example.com/public-info")
+
     def test_structured_response_passes_recency_to_fetcher_and_metadata(self):
         seen = {}
 
@@ -500,17 +610,17 @@ class DuckDuckGoMCPTests(unittest.TestCase):
         def failing_fetcher(query, timeout=15):
             raise OSError("network down")
 
-        result = duckduckgo_mcp.search_duckduckgo("python", fetcher=failing_fetcher)
+        result = duckduckgo_mcp.search_duckduckgo("public news", fetcher=failing_fetcher)
 
         self.assertEqual(result, duckduckgo_mcp.UNAVAILABLE_MESSAGE)
 
     def test_search_duckduckgo_returns_no_results_message_when_parsing_empty_page(self):
-        result = duckduckgo_mcp.search_duckduckgo("python", fetcher=lambda query: "<html></html>")
+        result = duckduckgo_mcp.search_duckduckgo("public news", fetcher=lambda query: "<html></html>")
 
-        self.assertEqual(result, 'DuckDuckGo returned no parsed results for "python".')
+        self.assertEqual(result, 'DuckDuckGo returned no parsed results for "public news".')
 
     def test_search_duckduckgo_returns_unavailable_message_on_duckduckgo_challenge(self):
-        result = duckduckgo_mcp.search_duckduckgo("python", fetcher=lambda query: SAMPLE_ANOMALY_HTML)
+        result = duckduckgo_mcp.search_duckduckgo("public news", fetcher=lambda query: SAMPLE_ANOMALY_HTML)
 
         self.assertIn("DuckDuckGo search is unavailable because DuckDuckGo returned a challenge", result)
 
@@ -518,13 +628,13 @@ class DuckDuckGoMCPTests(unittest.TestCase):
         def failing_fetcher(query, timeout=15):
             raise OSError("network down")
 
-        unavailable = duckduckgo_mcp.search_duckduckgo_response("python", fetcher=failing_fetcher)
+        unavailable = duckduckgo_mcp.search_duckduckgo_response("public news", fetcher=failing_fetcher)
         challenge = duckduckgo_mcp.search_duckduckgo_response(
-            "python",
+            "public news",
             fetcher=lambda query, timeout=15: SAMPLE_ANOMALY_HTML,
         )
         no_results = duckduckgo_mcp.search_duckduckgo_response(
-            "python",
+            "public news",
             fetcher=lambda query, timeout=15: "<html></html>",
         )
 
@@ -541,6 +651,37 @@ class DuckDuckGoMCPTests(unittest.TestCase):
 
         self.assertIn('DuckDuckGo results for "alpha beta":', result)
         self.assertIn("1. Alpha Result", result)
+
+    def test_cli_query_mode_prints_structured_search_response(self):
+        output = io.StringIO()
+
+        exit_code = duckduckgo_mcp.run_cli(
+            ["--query", "alpha beta", "--max-results", "2", "--format", "json"],
+            fetcher=lambda query, timeout=15, recency_days=None: SAMPLE_HTML,
+            stdout=output,
+        )
+
+        response = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["query"], "alpha beta")
+        self.assertEqual(response["results"][0]["url"], "https://example.com/alpha")
+
+    def test_cli_query_mode_blocks_software_install_queries(self):
+        output = io.StringIO()
+
+        exit_code = duckduckgo_mcp.run_cli(
+            ["--query", "install nmap windows", "--format", "json"],
+            fetcher=lambda query, timeout=15, recency_days=None: (_ for _ in ()).throw(
+                AssertionError("DuckDuckGo fetcher should not run")
+            ),
+            stdout=output,
+        )
+
+        response = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(response["status"], "blocked_by_policy")
+        self.assertIn("Context7", response["message"])
 
     def test_build_server_returns_fastmcp_server(self):
         server = duckduckgo_mcp.build_server()

@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from .schemas import SubAgentResult
 
 DEFAULT_MAX_SUBAGENT_WORKERS = 8
+DEFAULT_SUBAGENT_MAX_ITERATIONS = 10
 
 
 class SubAgent:
@@ -18,7 +19,7 @@ class SubAgent:
         model_client: Any,
         tool_executor: Any,
         context: dict[str, Any] | None = None,
-        max_iterations: int = 4,
+        max_iterations: int = DEFAULT_SUBAGENT_MAX_ITERATIONS,
         max_subagents: int = DEFAULT_MAX_SUBAGENT_WORKERS,
         subagent_budget: Any | None = None,
     ) -> None:

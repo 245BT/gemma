@@ -56,6 +56,16 @@ class BenchmarkRuntimeTests(unittest.TestCase):
 
         self.assertLessEqual(args.timeout, 120)
 
+    def test_responses_endpoint_payload_does_not_rewrite_output_token_caps(self):
+        payload = bench_runtime.build_endpoint_payload(
+            "http://unit.test/v1/responses",
+            {"prompt": "What is 2+2?", "max_tokens": 999999},
+        )
+
+        self.assertEqual(payload["input"], "What is 2+2?")
+        self.assertEqual(payload["max_tokens"], 999999)
+        self.assertNotIn("max_output_tokens", payload)
+
     def test_run_benchmark_writes_events_summary_and_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -283,6 +293,70 @@ class BenchmarkRuntimeTests(unittest.TestCase):
 
         self.assertEqual(summary["task_success_rate"], 1.0)
         self.assertIsNone(summary["test_pass_rate"])
+        self.assertNotIn("catalog_drift", summary)
+        self.assertNotIn("syntax_preflight_pass_rate", summary)
+        self.assertNotIn("hallucinated_tool_claim_rate", summary)
+        self.assertNotIn("raw_untrusted_bytes_in_prompt", summary)
+        self.assertNotIn("failed_json_tool_call_rate", summary)
+
+    def test_optional_hardening_metrics_are_serialized_when_supplied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workload_path = root / "workload.jsonl"
+            events_path = root / "events.jsonl"
+            summary_path = root / "summary.json"
+            markdown_path = root / "BENCHMARKS.md"
+            workload_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"id": "first", "request": {"prompt": "first"}}),
+                        json.dumps({"id": "second", "request": {"prompt": "second"}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            results = iter(
+                [
+                    {
+                        "text": "first",
+                        "catalog_drift": False,
+                        "syntax_preflight_pass_rate": 1.0,
+                        "hallucinated_tool_claim_rate": 0.0,
+                        "raw_untrusted_bytes_in_prompt": 12,
+                        "failed_json_tool_call_rate": 0.25,
+                    },
+                    {
+                        "text": "second",
+                        "catalog_drift": True,
+                        "syntax_preflight_pass_rate": 0.5,
+                        "hallucinated_tool_claim_rate": 0.5,
+                        "raw_untrusted_bytes_in_prompt": 8,
+                        "failed_json_tool_call_rate": 0.75,
+                    },
+                ]
+            )
+
+            summary = bench_runtime.run_benchmark(
+                workload_path=workload_path,
+                endpoint="http://unit.test/v1/responses",
+                phase="after",
+                run_label="unit-after",
+                events_path=events_path,
+                summary_path=summary_path,
+                markdown_path=markdown_path,
+                request_func=lambda endpoint, payload, emit_event: next(results),
+                resource_sampler=lambda: {},
+                clock=FakeClock(),
+            )
+
+            self.assertTrue(summary["catalog_drift"])
+            self.assertEqual(summary["syntax_preflight_pass_rate"], 0.75)
+            self.assertEqual(summary["hallucinated_tool_claim_rate"], 0.25)
+            self.assertEqual(summary["raw_untrusted_bytes_in_prompt"], 20)
+            self.assertEqual(summary["failed_json_tool_call_rate"], 0.5)
+            saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_summary["raw_untrusted_bytes_in_prompt"], 20)
 
 
 if __name__ == "__main__":

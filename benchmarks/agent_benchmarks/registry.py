@@ -41,6 +41,26 @@ _SUITES = (
         official_url="https://www.swebench.com/",
         description="Local manifest-driven benchmark for fixing GitHub bugs.",
     ),
+    SuiteSpec(
+        name="local-agent-behavior",
+        default_dataset="deterministic-local",
+        executable="python",
+        official_url="docs/research/composer2-user-provided.pdf",
+        description=(
+            "Deterministic local behavior checks for stall recovery, terminal discipline, "
+            "large-context handling, research citation readiness, and tool reliability."
+        ),
+    ),
+    SuiteSpec(
+        name="local-repo-fix",
+        default_dataset="generated-local",
+        executable="python",
+        official_url="docs/research/composer2/Composer2.extracted.txt",
+        description=(
+            "Generated CPU-only repo-fix benchmark with fail-to-pass, pass-to-pass, "
+            "changed-line, regression, and latency metrics."
+        ),
+    ),
 )
 
 

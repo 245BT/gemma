@@ -75,12 +75,10 @@ class DspyPrograms:
         model: str = DEFAULT_MODEL,
         api_base: str = DEFAULT_API_BASE,
         api_key: str = DEFAULT_API_KEY,
-        max_tokens: int = 512,
     ) -> None:
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
-        self.max_tokens = max_tokens
         self._dspy: Any | None = None
         self._lm: Any | None = None
         self._planner: Any | None = None
@@ -135,7 +133,6 @@ class DspyPrograms:
             api_base=self.api_base,
             api_key=self.api_key,
             model_type="responses",
-            max_tokens=self.max_tokens,
         )
         return self._lm
 

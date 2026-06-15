@@ -1,3 +1,6 @@
+
+---
+
 # Gemma Local Runtime Workspace
 
 This folder is a local Windows workspace for running a Gemma 4 26B A4B
@@ -26,6 +29,35 @@ Useful tests:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm test
+```
+
+## Local Command Matrix
+
+This pass targets local trusted operation, not hosted untrusted users. The
+global shims preserve the caller working directory through
+`GEMMA_CODEX_TARGET_DIR` and pass every argument through to `gemma-codex.cmd`.
+
+| Command | Mode | Notes |
+| --- | --- | --- |
+| `son` | direct | Uses `.codex-local` and the direct proxy. |
+| `son --reasoning` | reasoning | Uses `.codex-local-reasoning` and the reasoning proxy. |
+| `son --reasoing` | reasoning | Typo-compatible alias for `--reasoning`. |
+| `son --yolo` | direct yolo | Maps to Codex `--ask-for-approval never --sandbox danger-full-access`. |
+| `sonion --reasoning --yolo` | reasoning yolo | Uses the no-confirm Codex bypass flag and trusts the caller target dir. |
+| `operator --reasoing --yolo` | reasoning yolo | Same launcher behavior as `son`, with the typo-compatible reasoning flag. |
+
+Dry-run a launch without starting the runtime or Codex:
+
+```powershell
+$env:GEMMA_CODEX_DRY_RUN=1
+sonion --reasoning --yolo exec "inspect the workspace"
+Remove-Item Env:\GEMMA_CODEX_DRY_RUN
+```
+
+Temporary Codex 0.139 comparison command:
+
+```powershell
+npm exec --yes --package @openai/codex@0.139.0 -- codex --version
 ```
 
 Useful benchmarks:
@@ -220,6 +252,14 @@ text. The current agent expects strict JSON actions:
 Edit `gemma_agent\tool_registry.py`, `gemma_agent\tool_executor.py`, and
 `gemma_agent\safety.py` when the change involves tool allowlisting, schema
 validation, path checking, timeouts, or untrusted tool outputs.
+
+### Safe Parallel Work
+
+Gemma should use parallel batches for independent reads, searches, checks, and
+subagent tasks. Use `gemma_run_subagents` for independent investigations or
+review tracks, with bounded `max_workers`. Keep dependent commands, overlapping
+file edits, `git add`/`git commit`, installs, migrations, and test-after-edit
+loops serial.
 
 ### Thinking Summaries And Memory
 

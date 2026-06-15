@@ -165,8 +165,6 @@ def build_endpoint_payload(endpoint, payload):
     if "/v1/responses" in endpoint:
         if prompt is not None and "input" not in payload:
             payload["input"] = prompt
-        if "max_tokens" in payload and "max_output_tokens" not in payload:
-            payload["max_output_tokens"] = payload.pop("max_tokens")
         payload["model"] = model
         return payload
 
@@ -359,6 +357,12 @@ def run_benchmark(
     hallucinated_tool_calls = 0
     failed_json_tool_calls = 0
     failed_tool_calls = 0
+    catalog_drift_results = []
+    syntax_preflight_pass_rates = []
+    hallucinated_tool_claim_rates = []
+    raw_untrusted_bytes_in_prompt = 0
+    raw_untrusted_bytes_seen = False
+    failed_json_tool_call_rates = []
 
     run_started_at = clock()
     with events_path.open("w", encoding="utf-8") as handle:
@@ -469,6 +473,22 @@ def run_benchmark(
             hallucinated_tool_calls += int(result.get("hallucinated_tool_calls", 0) or 0)
             failed_json_tool_calls += int(result.get("failed_json_tool_calls", 0) or 0)
             failed_tool_calls += int(result.get("failed_tool_calls", 0) or 0)
+            catalog_drift = result.get("catalog_drift")
+            if isinstance(catalog_drift, bool):
+                catalog_drift_results.append(catalog_drift)
+            syntax_preflight_pass_rate = _number(result.get("syntax_preflight_pass_rate"))
+            if syntax_preflight_pass_rate is not None:
+                syntax_preflight_pass_rates.append(syntax_preflight_pass_rate)
+            hallucinated_tool_claim_rate = _number(result.get("hallucinated_tool_claim_rate"))
+            if hallucinated_tool_claim_rate is not None:
+                hallucinated_tool_claim_rates.append(hallucinated_tool_claim_rate)
+            raw_untrusted_bytes = _number(result.get("raw_untrusted_bytes_in_prompt"))
+            if raw_untrusted_bytes is not None:
+                raw_untrusted_bytes_in_prompt += raw_untrusted_bytes
+                raw_untrusted_bytes_seen = True
+            failed_json_tool_call_rate = _number(result.get("failed_json_tool_call_rate"))
+            if failed_json_tool_call_rate is not None:
+                failed_json_tool_call_rates.append(failed_json_tool_call_rate)
 
             text = result.get("text", "")
             expected_exact = workload.get("expected_exact")
@@ -526,6 +546,16 @@ def run_benchmark(
             "events_path": str(events_path),
             "summary_path": str(summary_path),
         }
+        if catalog_drift_results:
+            summary["catalog_drift"] = any(catalog_drift_results)
+        if syntax_preflight_pass_rates:
+            summary["syntax_preflight_pass_rate"] = _average(syntax_preflight_pass_rates)
+        if hallucinated_tool_claim_rates:
+            summary["hallucinated_tool_claim_rate"] = _average(hallucinated_tool_claim_rates)
+        if raw_untrusted_bytes_seen:
+            summary["raw_untrusted_bytes_in_prompt"] = int(raw_untrusted_bytes_in_prompt)
+        if failed_json_tool_call_rates:
+            summary["failed_json_tool_call_rate"] = _average(failed_json_tool_call_rates)
         writer.emit("run_summary", **summary)
 
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")

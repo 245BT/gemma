@@ -22,10 +22,10 @@ class FakeResponse:
 
 
 class UpstreamResponsesClientTests(unittest.TestCase):
-    def test_default_timeout_is_bounded(self):
+    def test_default_timeout_is_unlimited(self):
         client = UpstreamResponsesClient("http://127.0.0.1:8081")
 
-        self.assertLessEqual(client.timeout, 120)
+        self.assertIsNone(client.timeout)
 
     def test_create_response_posts_to_responses_endpoint(self):
         response_payload = {"output": [{"content": [{"type": "output_text", "text": "ok"}]}]}
